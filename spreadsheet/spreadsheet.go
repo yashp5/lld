@@ -2,6 +2,8 @@ package spreadsheet
 
 /*
 Design an Excel-like spreadsheet
+Its more like modified system design questions in a leetcode format
+I rmb my final being creating a spreadsheet that supports formula applications across different rows, and you have to make sure there’s no cycles in formula applications
 */
 
 /*

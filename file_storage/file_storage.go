@@ -1,58 +1,200 @@
 package filestorage
 
-/*
-You are tasked with implementing a simplified file storage service that allows users to upload, retrieve, copy, and manage files.
-Each file has a name, size, and optional time-to-live (TTL) value.
-*/
+import (
+	"fmt"
+	"slices"
+	"strings"
+)
 
-/*
-Level 1 – Initial Design & Basic Functions
-Implement the following methods:
+type file struct {
+	Name         string
+	Size         int
+	CreationTime int
+	TTL          int
+}
 
-FILE_UPLOAD(fileName string, fileSize int):
-	Upload a file to the storage system.
-	If a file with the same name already exists, throw an error.
+func (f *file) isAlive(at int) bool {
+	if f.TTL <= 0 {
+		return true
+	}
+	return f.CreationTime+f.TTL > at
+}
 
-FILE_GET(fileName string) int:
-	Retrieve the size of a file by its name.
-	If the file does not exist, return -1.
+type operationType int
 
-FILE_COPY(sourceFile string, destFile string):
-	Copy a file to a new location with a different name.
-	If the source file does not exist, throw an error.
-	If the destination file already exists, overwrite it.
-*/
+const (
+	opUpload operationType = iota
+	opCopy
+	opDelete
+)
 
-/*
-Level 2 – Data Structures & Data Processing
-Add the following method:
+type operation struct {
+	Timestamp   int
+	Type        operationType
+	FileName    string
+	OldFile     *file
+	NewFile     *file
+	AuxFileName string
+	AuxOldFile  *file
+	AuxNewFile  *file
+}
 
-FILE_SEARCH(prefix string) []string:
-	Return the top 10 files whose names start with the provided prefix.
-	Sort the results in descending order by size, and in case of a tie, by file name in ascending order.
-*/
+// fileStorage is our in-memory storage system with rollback functionality
+type fileStorage struct {
+	files   map[string]*file // currrent state
+	history []operation      // log of all opeartions for rollback
+}
 
-/*
-Level 3 – Refactoring & Encapsulation
-Extend the previous functionality to include TTL (Time to Live). Update the methods as follows:
+func newFileStorage() *fileStorage {
+	return &fileStorage{
+		files:   make(map[string]*file),
+		history: make([]operation, 0),
+	}
+}
 
-FILE_UPLOAD_AT(timestamp int, fileName string, fileSize int, ttl int):
-Upload a file with an optional TTL. Files with TTL will expire after the specified duration.\
+// uploads a file at a given timestamp, optionally with ttl
+func (fs *fileStorage) fileUploadAt(timestamp int, fileName string, fileSize int, ttl int) error {
+	if existing, ok := fs.files[fileName]; ok && existing.isAlive(timestamp) {
+		return fmt.Errorf("file %s already exists (alive at %d)", fileName, timestamp)
+	}
 
-FILE_GET_AT(timestamp int, fileName string) int:
-	Retrieve the size of a file at a given timestamp. Return -1 if the file has expired or does not exist.
+	newFile := &file{
+		Name:         fileName,
+		Size:         fileSize,
+		CreationTime: timestamp,
+		TTL:          ttl,
+	}
 
-FILE_COPY_AT(timestamp int, sourceFile string, destFile string):
-	Copy a file with all its metadata (including TTL) at a given timestamp.
-	FILE_SEARCH_AT(timestamp int, prefix string) []string:
-	Return the top 10 files that are still “alive” at the specified timestamp.
-*/
+	// Record old state in operation (if the file existed at all, alive or not)
+	var oldFile *file
+	if existing, found := fs.files[fileName]; found {
+		// We keep the oldFile for rollback, even if it was expired
+		temp := *existing
+		oldFile = &temp
+	}
 
-/*
-Level 4 – Extending Design & Functionality
-Add rollback functionality:
+	fs.files[fileName] = newFile
 
-ROLLBACK(timestamp int):
-	Roll back the state of the file storage system to the specified timestamp.
-	Ensure that TTLs are recalculated accordingly, and expired files are removed from the system.
-*/
+	// Log operation for rollback
+	op := operation{
+		Timestamp: timestamp,
+		Type:      opUpload,
+		FileName:  fileName,
+		OldFile:   oldFile,
+		NewFile:   newFile,
+	}
+	fs.history = append(fs.history, op)
+
+	return nil
+}
+
+func (fs *fileStorage) filetGetAt(timestamp int, fileName string) int {
+	f, exists := fs.files[fileName]
+	if !exists || !f.isAlive(timestamp) {
+		return 0
+	}
+	return f.Size
+}
+
+func (fs *fileStorage) fileCopyAt(timestamp int, sourceFile string, destFile string) error {
+	src, ok := fs.files[sourceFile]
+	if !ok || src.isAlive(timestamp) {
+		return fmt.Errorf("source file %s does not exist or expired at %d", sourceFile, timestamp)
+	}
+
+	// Save old state for destination (in case it existed)
+	var oldDest *file
+	if existing, found := fs.files[destFile]; found {
+		tmp := *existing
+		oldDest = &tmp
+	}
+
+	newCopy := &file{
+		Name:         destFile,
+		Size:         src.Size,
+		CreationTime: src.CreationTime,
+		TTL:          src.TTL,
+	}
+	fs.files[destFile] = newCopy
+
+	op := operation{
+		Timestamp:   timestamp,
+		Type:        opCopy,
+		FileName:    destFile,
+		OldFile:     oldDest,
+		NewFile:     newCopy,
+		AuxFileName: sourceFile,
+	}
+	fs.history = append(fs.history, op)
+
+	return nil
+}
+
+func (fs *fileStorage) fileSearchAt(timestamp int, prefix string) []string {
+	var candidates []file
+	for _, f := range fs.files {
+		if f.isAlive(timestamp) && strings.HasPrefix(f.Name, prefix) {
+			candidates = append(candidates, *f)
+		}
+	}
+
+	// Sort by size desc, then name asc
+	slices.SortFunc(candidates, func(i, j file) int {
+		if i.Size != j.Size {
+			return j.Size - i.Size
+		}
+		return strings.Compare(i.Name, j.Name)
+	})
+
+	// Return top 10 names
+	limit := 10
+	if len(candidates) < 10 {
+		limit = len(candidates)
+	}
+
+	result := []string{}
+	for i := 0; i < limit; i++ {
+		result = append(result, candidates[i].Name)
+	}
+	return result
+}
+
+// rollback reverts the state of the storage system to the specified timestamp
+// We look at the history (which is appended in chronological order)
+// For any opeartion with timestamp > target, we revert it in reverse order
+func (fs *fileStorage) rollback(target int) error {
+	for i := len(fs.history) - 1; i >= 0; i-- {
+		op := fs.history[i]
+		if op.Timestamp <= target {
+			break
+		}
+
+		// Revert
+		switch op.Type {
+		case opUpload:
+			// An upload replaced oldFile with newFile in fs.files
+			// So we restore oldFile (which could be nil if it didn't exist)
+			if op.OldFile == nil {
+				delete(fs.files, op.FileName)
+			} else {
+				// Restore the old file
+				oldCopy := *op.OldFile
+				fs.files[op.FileName] = &oldCopy
+			}
+		case opCopy:
+			// A copy replaced oldDest with newDest
+			if op.OldFile == nil {
+				// The dest file didn't exist previously, so remove it
+				delete(fs.files, op.FileName)
+			} else {
+				oldCopy := *op.OldFile
+				fs.files[op.FileName] = &oldCopy
+			}
+		case opDelete:
+		}
+
+		// Remove this operation from history
+		fs.history = fs.history[:i]
+	}
+	return nil
+}

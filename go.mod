@@ -1,3 +1,3 @@
-module github.com/yashp5/icf
+module github.com/yashp5/lld
 
 go 1.23.3
