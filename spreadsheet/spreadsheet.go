@@ -1,84 +1,174 @@
 package spreadsheet
 
-/*
-Design an Excel-like spreadsheet
-Its more like modified system design questions in a leetcode format
-I rmb my final being creating a spreadsheet that supports formula applications across different rows, and you have to make sure there’s no cycles in formula applications
-*/
+import (
+	"strconv"
+	"strings"
+)
 
-/*
-Level 1 – Initial Design & Basic Functions
-Implement the following methods for basic spreadsheet operations:
+type Cell struct {
+	x int
+	y int
+}
 
-SET(cell string, value string):
-	Sets the value of the specified cell.
-	If the cell already contains a value, overwrite it.
+type Excel struct {
+	height int
+	width  int
 
-GET(cell string) string:
-	Retrieves the value of the specified cell.
-	If the cell is empty, return "0".
+	mat     [][]int
+	adjlist map[Cell][]Cell
+}
 
-CLEAR(cell string):
-	Resets the cell to its default value ("0").
+func Constructor(height int, width byte) Excel {
+	mat := make([][]int, height)
+	for i := 0; i < height; i++ {
+		mat[i] = make([]int, width-'A'+1)
+	}
 
-SET("A1", "5")
-SET("B1", "10")
-*/
+	adjlist := make(map[Cell][]Cell)
 
-/*
-Level 2 – Data Structures & Data Processing
-Expand the spreadsheet to support formulas:
+	return Excel{
+		height:  height,
+		width:   int(width-'A') + 1,
+		mat:     mat,
+		adjlist: adjlist,
+	}
+}
 
-SET_FORMULA(cell string, formula string):
-	Sets a formula in a cell (e.g., "=A1+B1").
-	The formula references other cells, and the value should be calculated dynamically when needed.
+func (this *Excel) Set(row int, column byte, val int) {
+	target := Cell{x: row - 1, y: int(column - 'A')}
 
-EVALUATE(cell string) int:
-	Computes the value of a cell with a formula.
-	Supports basic operations (+, -, *, /).
-	If referenced cells contain formulas, resolve them recursively.
+	// remove old formula deps if any
+	for src, neighbors := range this.adjlist {
+		newNeighbors := []Cell{}
+		for _, nbr := range neighbors {
+			if nbr != target {
+				newNeighbors = append(newNeighbors, nbr)
+			}
+		}
+		this.adjlist[src] = newNeighbors
+	}
 
-SET("A1", "5")
-SET("B1", "10")
-SET_FORMULA("C1", "=A1+B1")
-EVALUATE("C1") -> 15
-*/
+	// now set the new value
+	preval := this.mat[target.x][target.y]
+	this.mat[target.x][target.y] = val
 
-/*
-Level 3 – Refactoring & Encapsulation
-Add the ability to define ranges and perform operations over them:
+	this.propogateDiff(target, target, val-preval)
+}
 
-SET_RANGE(startCell string, endCell string, value int):
-	Sets a value for all cells within the specified range.
+func (this *Excel) propogateDiff(cell Cell, sumcell Cell, diff int) {
+	if cell != sumcell {
+		this.mat[cell.x][cell.y] += diff
+	}
 
-SUM_RANGE(startCell string, endCell string) int:
-	Computes the sum of all values within a range of cells.
+	for _, cellNeigh := range this.adjlist[cell] {
+		this.propogateDiff(cellNeigh, sumcell, diff)
+	}
+}
 
-SET_RANGE("A1", "A3", 5)
-SUM_RANGE("A1", "A3") -> 15
-*/
+func (this *Excel) Get(row int, column byte) int {
+	col := int(column - 'A')
+	return this.mat[row-1][col]
+}
 
-/*
-Level 4 – Extending Design & Functionality
-Introduce snapshotting and rollback for the spreadsheet:
+func (this *Excel) GetFirstNRows(n int) [][]int {
+	firstNRows := [][]int{}
+	for i := 0; i < n; i++ {
+		row := []int{}
+		for j := 0; j < this.width; j++ {
+			row = append(row, this.mat[i][j])
+		}
+		firstNRows = append(firstNRows, row)
+	}
+	return firstNRows
+}
 
-SNAPSHOT():
-Save the current state of the spreadsheet.
+func (this *Excel) Sum(row int, column byte, numbers []string) int {
+	// define the sum cell
+	// get all the cells in numbers
+	// remove all edges to sumcell then add. This should handle update sum formula
+	// build graph directed edges from cells to sum cell
+	// need to calculate sum over the cells and put that into the sumcell
+	// propogate the changes in set method whenever a cell gets updated
 
-ROLLBACK():
-	Restore the spreadsheet to the last saved state.
-	All subsequent changes after the snapshot will be undone.
+	sumcell := Cell{x: row - 1, y: int(column - 'A')}
 
-SET("A1", "5")
-SNAPSHOT()
-SET("A1", "10")
-ROLLBACK()
-GET("A1") -> "5"
-*/
+	for cell, cellNeighbors := range this.adjlist {
+		newNeighbors := []Cell{}
+		for _, cellneighbor := range cellNeighbors {
+			if cellneighbor != sumcell {
+				newNeighbors = append(newNeighbors, cellneighbor)
+			}
+		}
+		this.adjlist[cell] = newNeighbors
+	}
 
-/*
-Constraints
-	Cell names follow Excel-like conventions (e.g., "A1", "B2").
-	The spreadsheet has a fixed size of 100x100 (cells A1 to J100).
-	Formulas and operations only involve cells within the spreadsheet bounds.
-*/
+	cells := []Cell{}
+	for _, number := range numbers {
+		numberCells := this.getCells(number)
+		cells = append(cells, numberCells...)
+	}
+
+	sum := 0
+	for _, cell := range cells {
+		this.adjlist[cell] = append(this.adjlist[cell], sumcell)
+		sum += this.mat[cell.x][cell.y]
+	}
+
+	this.setValueNoClear(row, column, sum)
+
+	return sum
+}
+
+func (this *Excel) setValueNoClear(row int, column byte, val int) {
+	target := Cell{x: row - 1, y: int(column - 'A')}
+
+	// now set the new value
+	preval := this.mat[target.x][target.y]
+	this.mat[target.x][target.y] = val
+
+	this.propogateDiff(target, target, val-preval)
+}
+
+func (this *Excel) getCells(number string) []Cell {
+	// "ColRow" , "ColRow1:ColRow2"
+	strs := strings.Split(number, ":")
+
+	if len(strs) == 1 {
+		x, _ := strconv.Atoi(strs[0][1:])
+		cell := Cell{
+			x: x - 1,
+			y: int(strs[0][0] - 'A'),
+		}
+		return []Cell{cell}
+	}
+
+	cells := []Cell{}
+
+	cell1x, _ := strconv.Atoi(strs[0][1:])
+	cell1 := Cell{
+		x: cell1x - 1,
+		y: int(strs[0][0] - 'A'),
+	}
+
+	cell2x, _ := strconv.Atoi(strs[1][1:])
+	cell2 := Cell{
+		x: cell2x - 1,
+		y: int(strs[1][0] - 'A'),
+	}
+
+	for i := cell1.x; i <= cell2.x; i++ {
+		for j := cell1.y; j <= cell2.y; j++ {
+			cells = append(cells, Cell{x: i, y: j})
+		}
+	}
+
+	return cells
+}
+
+/**
+ * Your Excel object will be instantiated and called as such:
+ * obj := Constructor(height, width);
+ * obj.Set(row,column,val);
+ * param_2 := obj.Get(row,column);
+ * param_3 := obj.Sum(row,column,numbers);
+ */
