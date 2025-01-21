@@ -96,6 +96,27 @@ func (fs *fileStorage) filetGetAt(timestamp int, fileName string) int {
 	return f.Size
 }
 
+func (fs *fileStorage) fileDeleteAt(timestamp int, fileName string) error {
+	f, exists := fs.files[fileName]
+	if !exists || !f.isAlive(timestamp) {
+		return fmt.Errorf("file %s does not exist or expired at %d", fileName, timestamp)
+	}
+
+	// Record delete op in history
+	op := operation{
+		Timestamp: timestamp,
+		Type:      opDelete,
+		FileName:  fileName,
+		OldFile:   f,
+	}
+
+	delete(fs.files, fileName)
+
+	fs.history = append(fs.history, op)
+
+	return nil
+}
+
 func (fs *fileStorage) fileCopyAt(timestamp int, sourceFile string, destFile string) error {
 	src, ok := fs.files[sourceFile]
 	if !ok || src.isAlive(timestamp) {
@@ -191,6 +212,8 @@ func (fs *fileStorage) rollback(target int) error {
 				fs.files[op.FileName] = &oldCopy
 			}
 		case opDelete:
+			// A file was deleted, restore it
+			fs.files[op.FileName] = op.OldFile
 		}
 
 		// Remove this operation from history
